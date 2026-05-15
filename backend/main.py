@@ -1,13 +1,22 @@
-from fastapi import FastAPI, Depends, Body
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from pydantic import BaseModel
-
 from predictor import analyze_match
-from api_client import get_live_upcoming_matches, simplify_fixture
-from database import engine, get_db
-from models import Base, Prediction, User
-from auth import hash_password, verify_password, create_access_token
+from api_client import (
+    get_live_upcoming_matches,
+    simplify_fixture,
+)
+from database import (
+    SessionLocal,
+    engine,
+)
+from models import Base, PredictionHistory, User
+from auth import (
+    hash_password,
+    verify_password,
+    create_access_token,
+)
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 Base.metadata.create_all(bind=engine)
 
@@ -15,13 +24,14 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://smartpick-eq6zdhsrz-louwgoodwill-sys-projects.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-SAFE_PICK_THRESHOLD = 80
 
 
 class RegisterRequest(BaseModel):
@@ -35,400 +45,318 @@ class LoginRequest(BaseModel):
     password: str
 
 
-fallback_fixtures = [
-    {
-        "fixture_id": 1,
-        "date": "2026-05-18T16:00:00",
-        "league": "Premier League",
-        "home": "Arsenal",
-        "away": "Everton",
-        "home_logo": "https://media.api-sports.io/football/teams/42.png",
-        "away_logo": "https://media.api-sports.io/football/teams/45.png",
-        "status": "NS",
-    },
-    {
-        "fixture_id": 2,
-        "date": "2026-05-18T18:30:00",
-        "league": "Premier League",
-        "home": "Manchester City",
-        "away": "West Ham",
-        "home_logo": "https://media.api-sports.io/football/teams/50.png",
-        "away_logo": "https://media.api-sports.io/football/teams/48.png",
-        "status": "NS",
-    },
-    {
-        "fixture_id": 3,
-        "date": "2026-06-11T21:00:00",
-        "league": "FIFA World Cup 2026",
-        "home": "Mexico",
-        "away": "Brazil",
-        "home_logo": "https://media.api-sports.io/football/teams/16.png",
-        "away_logo": "https://media.api-sports.io/football/teams/6.png",
-        "status": "NS",
-    },
-]
-
-demo_teams = [
-    {
-        "name": "Arsenal",
-        "under45": 90,
-        "under35": 72,
-        "over05": 100,
-        "cornersUnder125": 84,
-        "doubleChance": 91,
-    },
-    {
-        "name": "Everton",
-        "under45": 86,
-        "under35": 70,
-        "over05": 92,
-        "cornersUnder125": 81,
-        "doubleChance": 62,
-    },
-    {
-        "name": "Manchester City",
-        "under45": 76,
-        "under35": 58,
-        "over05": 100,
-        "cornersUnder125": 70,
-        "doubleChance": 94,
-    },
-    {
-        "name": "West Ham",
-        "under45": 80,
-        "under35": 61,
-        "over05": 94,
-        "cornersUnder125": 75,
-        "doubleChance": 64,
-    },
-    {
-        "name": "Mexico",
-        "under45": 88,
-        "under35": 73,
-        "over05": 93,
-        "cornersUnder125": 79,
-        "doubleChance": 80,
-    },
-    {
-        "name": "Brazil",
-        "under45": 84,
-        "under35": 68,
-        "over05": 96,
-        "cornersUnder125": 78,
-        "doubleChance": 86,
-    },
-]
-
-
-def find_team(name):
-    return next((team for team in demo_teams if team["name"] == name), None)
+class PredictionResultRequest(BaseModel):
+    result: str
+    is_correct: bool
 
 
 @app.get("/")
 def home():
     return {
-        "message": "SmartPick AI backend is running",
-        "mode": "Safe Pick Mode",
-        "safe_pick_threshold": SAFE_PICK_THRESHOLD,
-        "database": "connected",
-        "auth": "enabled",
-        "disclaimer": "Predictions are probability-based and not guaranteed.",
-    }
-
-
-@app.post("/auth/register")
-def register_user(user: RegisterRequest, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter(
-        (User.email == user.email) | (User.username == user.username)
-    ).first()
-
-    if existing_user:
-        return {
-            "error": "User already exists"
-        }
-
-    new_user = User(
-        username=user.username,
-        email=user.email,
-        hashed_password=hash_password(user.password),
-        is_admin=False,
-    )
-
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    return {
-        "message": "User registered successfully",
-        "user": {
-            "id": new_user.id,
-            "username": new_user.username,
-            "email": new_user.email,
-            "is_admin": new_user.is_admin,
-        },
-    }
-
-
-@app.post("/auth/login")
-def login_user(user: LoginRequest, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter(User.email == user.email).first()
-
-    if not existing_user:
-        return {
-            "error": "Invalid email or password"
-        }
-
-    if not verify_password(user.password, existing_user.hashed_password):
-        return {
-            "error": "Invalid email or password"
-        }
-
-    token = create_access_token({
-        "sub": existing_user.email,
-        "user_id": existing_user.id,
-        "is_admin": existing_user.is_admin,
-    })
-
-    return {
-        "message": "Login successful",
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "id": existing_user.id,
-            "username": existing_user.username,
-            "email": existing_user.email,
-            "is_admin": existing_user.is_admin,
-        },
+        "message": "SmartPick AI backend is running"
     }
 
 
 @app.get("/fixtures/upcoming")
-def upcoming():
+def upcoming_fixtures():
     try:
         fixtures = get_live_upcoming_matches()
-        simplified = [simplify_fixture(f) for f in fixtures]
 
-        if len(simplified) > 0:
-            return {
-                "source": "live_api",
-                "fixtures": simplified,
-            }
+        simplified = [
+            simplify_fixture(match)
+            for match in fixtures
+        ]
 
         return {
-            "source": "fallback_demo",
-            "note": "API returned no current fixtures on this plan, so fallback fixtures are shown.",
-            "fixtures": fallback_fixtures,
+            "fixtures": simplified,
+            "source": "API-Football",
         }
 
     except Exception as error:
-        return {
-            "source": "fallback_demo",
-            "error": str(error),
-            "fixtures": fallback_fixtures,
-        }
+        raise HTTPException(
+            status_code=500,
+            detail=str(error),
+        )
 
 
 @app.get("/safe-pick")
-def safe_pick(home_team: str, away_team: str, db: Session = Depends(get_db)):
-    home = find_team(home_team)
-    away = find_team(away_team)
+def safe_pick(
+    home_team: str,
+    away_team: str,
+):
+    db: Session = SessionLocal()
 
-    if not home or not away:
-        return {
-            "error": "Team not found in current demo model",
-            "message": "Live team stats will be added when full API access is available.",
-        }
+    try:
+        prediction = analyze_match(
+            home_team,
+            away_team,
+        )
 
-    result = analyze_match(home, away)
-    best = result["best_pick"]
+        if not prediction.get("error"):
+            history = PredictionHistory(
+                match_name=f"{home_team} vs {away_team}",
+                pick=prediction["best_pick"][
+                    "pick"
+                ],
+                market=prediction["best_pick"][
+                    "market"
+                ],
+                confidence=prediction[
+                    "best_pick"
+                ]["confidence"],
+                risk=prediction["risk"],
+                result="pending",
+                is_correct=False,
+            )
 
-    risk = (
-        "Low"
-        if best["confidence"] >= 85
-        else "Medium"
-        if best["confidence"] >= 80
-        else "High"
-    )
+            db.add(history)
+            db.commit()
 
-    is_safe = best["confidence"] >= SAFE_PICK_THRESHOLD
+        return prediction
 
-    saved_prediction = Prediction(
-        match_name=f"{home_team} vs {away_team}",
-        pick=best["pick"],
-        market=best["market"],
-        confidence=best["confidence"],
-        risk=risk,
-        is_safe_pick=is_safe,
-    )
-
-    db.add(saved_prediction)
-    db.commit()
-    db.refresh(saved_prediction)
-
-    return {
-        "match": f"{home_team} vs {away_team}",
-        "safe_pick_mode": True,
-        "is_safe_pick": is_safe,
-        "threshold": SAFE_PICK_THRESHOLD,
-        "best_pick": best,
-        "risk": risk,
-        "ai_scores": result.get(
-            "ai_scores",
-            {
-                "attack_rating": best["confidence"],
-                "defense_rating": best["confidence"],
-                "momentum_rating": best["confidence"],
-                "safety_score": best["confidence"],
-            },
-        ),
-        "ai_summary": result.get("ai_summary", []),
-        "reason": [
-            "Market selected from safer prediction categories.",
-            "Confidence passed the Safe Pick threshold."
-            if is_safe
-            else "Confidence is below Safe Pick threshold.",
-            "No pick is better than a risky pick.",
-        ],
-        "all_predictions": result["all_predictions"],
-        "saved_prediction_id": saved_prediction.id,
-        "disclaimer": "Predictions are probability-based and not guaranteed.",
-    }
+    finally:
+        db.close()
 
 
 @app.get("/predictions/history")
-def prediction_history(db: Session = Depends(get_db)):
-    predictions = (
-        db.query(Prediction)
-        .order_by(Prediction.created_at.desc())
-        .all()
-    )
+def prediction_history():
+    db: Session = SessionLocal()
 
-    return {
-        "predictions": predictions
-    }
+    try:
+        predictions = (
+            db.query(PredictionHistory)
+            .order_by(
+                PredictionHistory.created_at.desc()
+            )
+            .all()
+        )
+
+        results = []
+
+        for item in predictions:
+            results.append(
+                {
+                    "id": item.id,
+                    "match_name": item.match_name,
+                    "pick": item.pick,
+                    "market": item.market,
+                    "confidence": item.confidence,
+                    "risk": item.risk,
+                    "result": item.result,
+                    "is_correct": item.is_correct,
+                }
+            )
+
+        return {"predictions": results}
+
+    finally:
+        db.close()
 
 
 @app.delete("/predictions/clear")
-def clear_predictions(db: Session = Depends(get_db)):
-    db.query(Prediction).delete()
-    db.commit()
+def clear_prediction_history():
+    db: Session = SessionLocal()
 
-    return {
-        "message": "Prediction history cleared successfully."
-    }
+    try:
+        db.query(PredictionHistory).delete()
+
+        db.commit()
+
+        return {
+            "message": "Prediction history cleared"
+        }
+
+    finally:
+        db.close()
 
 
 @app.put("/predictions/{prediction_id}/result")
 def update_prediction_result(
     prediction_id: int,
-    result: str = Body(...),
-    is_correct: bool = Body(...),
-    db: Session = Depends(get_db),
+    data: PredictionResultRequest,
 ):
-    prediction = (
-        db.query(Prediction)
-        .filter(Prediction.id == prediction_id)
-        .first()
-    )
+    db: Session = SessionLocal()
 
-    if not prediction:
+    try:
+        prediction = (
+            db.query(PredictionHistory)
+            .filter(
+                PredictionHistory.id
+                == prediction_id
+            )
+            .first()
+        )
+
+        if not prediction:
+            raise HTTPException(
+                status_code=404,
+                detail="Prediction not found",
+            )
+
+        prediction.result = data.result
+        prediction.is_correct = data.is_correct
+
+        db.commit()
+
         return {
-            "error": "Prediction not found"
+            "message": "Prediction updated"
         }
 
-    prediction.result = result
-    prediction.is_correct = is_correct
-
-    db.commit()
-    db.refresh(prediction)
-
-    return {
-        "message": "Prediction result updated successfully",
-        "prediction": prediction,
-    }
-
-
-@app.get("/predictions/accuracy")
-def prediction_accuracy(db: Session = Depends(get_db)):
-    completed = (
-        db.query(Prediction)
-        .filter(Prediction.is_correct.isnot(None))
-        .all()
-    )
-
-    total_completed = len(completed)
-
-    correct = len([p for p in completed if p.is_correct])
-
-    accuracy = (
-        round((correct / total_completed) * 100, 2)
-        if total_completed > 0
-        else 0
-    )
-
-    return {
-        "total_completed": total_completed,
-        "correct_predictions": correct,
-        "incorrect_predictions": total_completed - correct,
-        "accuracy": accuracy,
-    }
+    finally:
+        db.close()
 
 
 @app.get("/admin/stats")
-def admin_stats(db: Session = Depends(get_db)):
-    total_users = db.query(User).count()
+def admin_stats():
+    db: Session = SessionLocal()
 
-    total_predictions = db.query(Prediction).count()
+    try:
+        total_predictions = (
+            db.query(PredictionHistory).count()
+        )
 
-    completed = (
-        db.query(Prediction)
-        .filter(Prediction.is_correct.isnot(None))
-        .all()
-    )
+        correct_predictions = (
+            db.query(PredictionHistory)
+            .filter(
+                PredictionHistory.is_correct
+                == True
+            )
+            .count()
+        )
 
-    correct = len([p for p in completed if p.is_correct])
+        incorrect_predictions = (
+            db.query(PredictionHistory)
+            .filter(
+                PredictionHistory.result == "lost"
+            )
+            .count()
+        )
 
-    incorrect = len(
-        [p for p in completed if p.is_correct is False]
-    )
+        total_users = db.query(User).count()
 
-    accuracy = (
-        round((correct / len(completed)) * 100, 2)
-        if completed
-        else 0
-    )
+        accuracy = 0
 
-    return {
-        "total_users": total_users,
-        "total_predictions": total_predictions,
-        "completed_predictions": len(completed),
-        "correct_predictions": correct,
-        "incorrect_predictions": incorrect,
-        "accuracy": accuracy,
-    }
+        completed = (
+            correct_predictions
+            + incorrect_predictions
+        )
 
+        if completed > 0:
+            accuracy = round(
+                (
+                    correct_predictions
+                    / completed
+                )
+                * 100,
+                2,
+            )
 
-@app.get("/admin/users")
-def admin_users(db: Session = Depends(get_db)):
-    users = (
-        db.query(User)
-        .order_by(User.created_at.desc())
-        .all()
-    )
+        return {
+            "total_predictions": total_predictions,
+            "correct_predictions": correct_predictions,
+            "incorrect_predictions": incorrect_predictions,
+            "accuracy": accuracy,
+            "total_users": total_users,
+        }
 
-    return {
-        "users": users
-    }
+    finally:
+        db.close()
 
 
-@app.get("/admin/predictions")
-def admin_predictions(db: Session = Depends(get_db)):
-    predictions = (
-        db.query(Prediction)
-        .order_by(Prediction.created_at.desc())
-        .all()
-    )
+@app.post("/auth/register")
+def register_user(
+    user: RegisterRequest,
+):
+    db: Session = SessionLocal()
 
-    return {
-        "predictions": predictions
-    }
+    try:
+        existing = (
+            db.query(User)
+            .filter(User.email == user.email)
+            .first()
+        )
+
+        if existing:
+            return {
+                "error": "Email already exists"
+            }
+
+        new_user = User(
+            username=user.username,
+            email=user.email,
+            password=hash_password(
+                user.password
+            ),
+        )
+
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+
+        token = create_access_token(
+            {
+                "sub": new_user.email,
+            }
+        )
+
+        return {
+            "message": "Registration successful",
+            "access_token": token,
+            "user": {
+                "id": new_user.id,
+                "username": new_user.username,
+                "email": new_user.email,
+            },
+        }
+
+    finally:
+        db.close()
+
+
+@app.post("/auth/login")
+def login_user(
+    credentials: LoginRequest,
+):
+    db: Session = SessionLocal()
+
+    try:
+        user = (
+            db.query(User)
+            .filter(
+                User.email
+                == credentials.email
+            )
+            .first()
+        )
+
+        if not user:
+            return {
+                "error": "Invalid credentials"
+            }
+
+        if not verify_password(
+            credentials.password,
+            user.password,
+        ):
+            return {
+                "error": "Invalid credentials"
+            }
+
+        token = create_access_token(
+            {
+                "sub": user.email,
+            }
+        )
+
+        return {
+            "message": "Login successful",
+            "access_token": token,
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+            },
+        }
+
+    finally:
+        db.close()
